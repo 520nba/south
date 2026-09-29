@@ -115,6 +115,19 @@ def redact(url: str) -> str:
     return re.sub(r"//[^@/]+@", "//***@", url)
 
 
+def cf_evidence(text: str) -> str:
+    """从拦截页里挖一点可核对的证据：命中的标记 + 页面标题。"""
+    hit = next((m for m in CF_MARKERS if m in text[:4000]), "")
+    m = re.search(r"<title[^>]*>(.*?)</title>", text, re.S | re.I)
+    title = re.sub(r"\s+", " ", m.group(1)).strip()[:60] if m else ""
+    parts = []
+    if hit:
+        parts.append(f"命中标记「{hit}」")
+    if title:
+        parts.append(f"页面标题「{title}」")
+    return "；".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # 配置 / 日志
 # --------------------------------------------------------------------------- #
@@ -274,7 +287,13 @@ def pick_base(opener, cfg, cookie, debug=False) -> tuple[str | None, bool]:
 
 
 def detect_login(text: str) -> bool:
-    """登录后页面不再出现登录表单字段 pwuser。"""
+    """能否从页面确认「已登录」。
+
+    注意：Cloudflare 挑战页里既没有 pwuser 也没有「您没有登录」，
+    早期版本因此把它误判成「已登录」，这里必须先排除掉。
+    """
+    if looks_like_cf(text):
+        return False
     if 'name="pwuser"' in text or "您没有登录" in text:
         return False
     return True
@@ -350,15 +369,28 @@ def run_probe(cfg, cookie: str, debug=False) -> int:
     print("| --- | --- | --- | --- | --- |")
     bases = [cfg["base_url"]] + [u for u in cfg.get("fallback_urls", [])
                                  if u and u != cfg["base_url"]]
+    notes = []
     for base in bases:
         status, text = http_get(
             opener, base.rstrip("/") + "/plugin.php?H_name=tasks.html", cfg, cookie)
         if text.startswith("__EXC__"):
             print(f"| {base} | 异常 | - | - | {text[7:50]} |")
             continue
-        cf = "**是**" if looks_like_cf(text) else "否"
-        login = "已登录" if detect_login(text) else "未登录"
+        blocked = looks_like_cf(text)
+        cf = "**是**" if blocked else "否"
+        if blocked:
+            # 被拦截时无法判定登录态，别硬猜成「已登录」
+            login = "无法判定"
+            ev = cf_evidence(text)
+            if ev:
+                notes.append(f"- {base} → {ev}")
+        else:
+            login = "已登录" if detect_login(text) else "未登录"
         print(f"| {base} | {status} | {len(text)} | {cf} | {login} |")
+    if notes:
+        print()
+        print("拦截证据：")
+        print("\n".join(notes))
     print()
     print("判读方法：")
     print("  1. 出口 IP 和你浏览器当前的公网 IP 不一致 → 会话会被 PHPWind 判为异地，")
@@ -384,8 +416,12 @@ def run_sign(cfg, cookie, debug=False, check_only=False, strict=False) -> int:
 
     # 页面探测：登录态 + 任务清单
     _, page = http_get(opener, f"{base}/plugin.php?H_name=tasks.html", cfg, cookie)
+    if looks_like_cf(page):
+        log(f"任务页被 Cloudflare 拦截，无法校验登录态 —— 机房 / 代理 IP 的典型症状。（{cf_evidence(page)}）")
+        return 2
     if not detect_login(page):
-        log("Cookie 未通过登录校验（返回的是登录表单）。请重新抓取 Cookie 后重试。")
+        log("Cookie 未通过登录校验（返回的是登录表单）。若你此刻在浏览器里明明是登录状态，"
+            "多半是会话与登录 IP 绑定，异地重放会被 PHPWind 判为未登录。")
         return 3
 
     tasks = discover_tasks(page, cfg)
