@@ -112,6 +112,7 @@ async function doProbe(cookie) {
         CF拦截: looksCF(r.text),
         登录态: judgeLogin(r.text),
         页面标题: titleOf(r.text),
+        片段: r.text.replace(/\s+/g, ' ').slice(0, 120),
         服务端下发新Cookie: r.setCookie,
       });
     } catch (e) {
@@ -122,6 +123,25 @@ async function doProbe(cookie) {
     Worker出口IP: ip,
     Cookie: cookie ? `已传入（${cookie.length} 字符）` : '未传入（只做可达性探测）',
     结果: rows,
+  };
+}
+
+// 直打真实 ajax 鉴权接口，绕开页面判断。
+// cid 传一个不存在的任务号即可做「零副作用」的鉴权探针：
+//   未登录 → 「您还没有登录或注册」；已登录 → 会变成任务不存在之类的文案。
+async function doAjax(cookie, action, cid, mirrorIdx) {
+  const idx = Math.min(Math.max(mirrorIdx | 0, 0), MIRRORS.length - 1);
+  const base = MIRRORS[idx];
+  const url = `${base}/plugin.php?H_name=tasks&action=ajax&actions=${action}`
+            + `&cid=${cid}&nowtime=${Date.now()}`;
+  const r = await httpGet(url, cookie);
+  return {
+    url,
+    Worker出口IP: await egressIP(),
+    Code: r.status,
+    字节: r.bytes,
+    原始: r.text.slice(0, 300),
+    CDATA: stripCdata(r.text).slice(0, 200),
   };
 }
 
@@ -197,6 +217,12 @@ export default {
       return new Response(USAGE, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
     if (path === '/probe') return json(await doProbe(cookie));
+    if (path === '/ajax') {
+      const q = new URL(request.url).searchParams;
+      const action = (q.get('actions') || 'job').replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
+      const cid = (q.get('cid') || '99999').replace(/[^0-9]/g, '').slice(0, 6) || '99999';
+      return json(await doAjax(cookie, action, cid, Number(q.get('mirror') || 0)));
+    }
     if (path === '/sign') {
       const dry = new URL(request.url).searchParams.get('dry') === '1';
       return json(await doSign(cookie, dry));
