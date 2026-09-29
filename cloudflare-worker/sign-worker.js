@@ -49,6 +49,11 @@ const TASKS = [
   { cid: 14, name: '周常任务' },
 ];
 
+// Bark 推送。BARK 变量存设备地址（如 https://api.day.app/<key>），不写进源码。
+// group / ttl 可用 BARK_GROUP / BARK_TTL 变量覆盖。
+const BARK_GROUP = '南+签到';
+const BARK_TTL = 600;
+
 function looksCF(text) {
   const head = text.slice(0, 4000);
   return CF_MARKERS.some((m) => head.includes(m));
@@ -153,7 +158,7 @@ async function doAjax(cookie, action, cid, mirrorIdx, ua) {
   };
 }
 
-async function doSign(cookie, dryRun, ua) {
+async function doSign(env, cookie, dryRun, ua) {
   if (!cookie) {
     return { ok: false, reason: '没有拿到 Cookie：请传 X-Cookie 请求头，或设置 COOKIE 变量' };
   }
@@ -169,11 +174,10 @@ async function doSign(cookie, dryRun, ua) {
   const usable = probes.find((p) => p.authed);
 
   if (!usable) {
-    return {
-      ok: false,
-      reason: '所有镜像都判为未登录。若 Cookie 刚抓不久，检查 UA 是否与抓 Cookie 的浏览器一致（本接口可用 X-UA 覆盖）',
-      鉴权探针: probes,
-    };
+    const reason = '所有镜像都判为未登录。若 Cookie 刚抓不久，检查 UA 是否与抓 Cookie 的浏览器一致';
+    const bark = await notifyBark(env, '南+ 签到失败',
+      `${reason}\n` + probes.map((p) => `${p.base}: ${p.msg}`).join('\n'));
+    return { ok: false, reason, bark, 鉴权探针: probes };
   }
   if (dryRun) {
     return { ok: true, dryRun: true, 使用镜像: usable.base, 鉴权原文: usable.msg, 鉴权探针: probes };
@@ -195,11 +199,23 @@ async function doSign(cookie, dryRun, ua) {
     });
     await new Promise((r) => setTimeout(r, 1000));
   }
+  const bj = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  const lines = results.map((r) => {
+    const raw = String(r.领取奖励 || r.申请任务 || '');
+    const got = /^success/.test(raw);
+    return `${got ? '✓' : '·'} ${r.任务}：${raw.replace(/^success\s*/, '')}`;
+  });
+  // 只有至少一个任务真的「success」才算有变化，否则如实说无变化（冷却期重复跑就是这种）
+  const changed = results.some((r) => /^success/.test(String(r.领取奖励 || '')));
+  const bark = await notifyBark(env, changed ? '南+ 签到完成' : '南+ 签到（本次无变化）',
+    [`${bj}（北京）`, `镜像 ${base.replace('https://www.', '')}`, '', ...lines].join('\n'));
+
   return {
     ok: true,
     Worker出口IP: await egressIP(),
     使用镜像: base,
     鉴权原文: usable.msg,
+    bark,
     结果: results,
   };
 }
@@ -217,6 +233,40 @@ async function authProbe(base, cookie, ua) {
     msg,
     authed: !/您还没有登录|不能使用此功能|未登录/.test(msg),
   };
+}
+
+// 推送签到结果到 Bark。BARK 未配置时静默跳过。
+async function notifyBark(env, title, body) {
+  const base = ((env && env.BARK) || '').trim().replace(/\/+$/, '');
+  if (!base) return '未配置 BARK 变量，跳过推送';
+  const group = ((env && env.BARK_GROUP) || BARK_GROUP).trim();
+  const ttl = Number(((env && env.BARK_TTL) || BARK_TTL) || 0);
+
+  // 优先 POST JSON：正文较长时比把内容塞进 URL 路径可靠
+  try {
+    const res = await fetch(base, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ title, body, group, ttl }),
+    });
+    const txt = (await res.text()).slice(0, 120);
+    if (res.ok) return `POST ${res.status} ${txt}`;
+    console.log('[Bark] POST failed', res.status, txt);
+  } catch (e) {
+    console.log('[Bark] POST threw', String(e));
+  }
+
+  // 兜底 GET：与 curl 示例同形
+  try {
+    const qs = new URLSearchParams();
+    if (group) qs.set('group', group);
+    if (ttl) qs.set('ttl', String(ttl));
+    const url = `${base}/${encodeURIComponent(title)}/${encodeURIComponent(body)}?${qs}`;
+    const res = await fetch(url);
+    return `GET ${res.status}`;
+  } catch (e) {
+    return `推送失败: ${String(e)}`;
+  }
 }
 
 function cookieOf(env, request) {
@@ -262,13 +312,13 @@ export default {
     }
     if (path === '/sign') {
       const dry = new URL(request.url).searchParams.get('dry') === '1';
-      return json(await doSign(cookie, dry, ua));
+      return json(await doSign(env, cookie, dry, ua));
     }
     return new Response('未知路径，试试 / 或 /probe\n', { status: 404 });
   },
 
   async scheduled(event, env, ctx) {
     // 定时任务没有请求对象，Cookie 和 UA 都从 Worker 变量取（都要设！只设 Cookie 会因 UA 不符而失败）
-    ctx.waitUntil(doSign(cookieOf(env, null), false, (env && env.UA) || ''));
+    ctx.waitUntil(doSign(env, cookieOf(env, null), false, (env && env.UA) || ''));
   },
 };

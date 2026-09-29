@@ -104,6 +104,9 @@ def main() -> int:
     ap.add_argument("--cron", action="store_true", help="添加定时触发器 23 1 * * *")
     ap.add_argument("--secret-file", metavar="PATH", help="把这个文件的 Cookie 存为加密变量 COOKIE")
     ap.add_argument("--ua", metavar="UA", help="把浏览器真实 UA 存为加密变量 UA（这个站按 UA 绑会话，必须设）")
+    ap.add_argument("--bark", metavar="URL", help="Bark 设备地址存为加密变量 BARK，如 https://api.day.app/<key>")
+    ap.add_argument("--bark-group", metavar="NAME", help="推送分组名（默认 南+签到）")
+    ap.add_argument("--bark-ttl", metavar="SEC", help="推送保留秒数（默认 600）")
     ap.add_argument("--all", action="store_true", help="= 上传 + workers.dev 路由")
     ap.add_argument("--show-url", action="store_true", help="只打印 Worker 地址")
     args = ap.parse_args()
@@ -173,6 +176,17 @@ def main() -> int:
                         {"name": "UA", "text": args.ua.strip(), "type": "secret_text"})
         step(ok, f"写入加密变量 UA（{len(args.ua.strip())} 字符）"
              if ok else f"写入 UA 失败：{errors_of(resp)}")
+
+    # 6. Bark 推送地址 + 可选分组/TTL
+    for name, val in (("BARK", args.bark), ("BARK_GROUP", args.bark_group),
+                      ("BARK_TTL", args.bark_ttl)):
+        if not val:
+            continue
+        ok, resp = call("PUT", f"/workers/scripts/{SCRIPT_NAME}/secrets", acct, token,
+                        {"name": name, "text": str(val).strip(), "type": "secret_text"})
+        shown = val if name != "BARK" else "https://api.day.app/***"
+        step(ok, f"写入加密变量 {name} = {shown}"
+             if ok else f"写入 {name} 失败：{errors_of(resp)}")
 
     if sub:
         print(f"\nWorker 地址：https://{SCRIPT_NAME}.{sub}.workers.dev")

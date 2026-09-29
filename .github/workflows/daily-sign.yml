@@ -9,9 +9,12 @@ name: n+ 每日签到（打火器）
 #   · 不会再遇到前面那轮「Cloudflare 把 GitHub 机房 IP 挡在挑战页外」的问题
 #   · 也不会遇到会话绑定问题（UA 已固定为抓 Cookie 那个浏览器的真实 UA）
 #
-# 为什么不用 Worker 原生 Cron：账户免费版的 5 个 cron 名额已被别的 Worker 占满
-# （报错 10072）。等哪天腾出名额，把下面的 schedule 撤掉、改用 Worker 原生 Cron
-# 即可，这个文件可以直接删。
+# 之所以用 Actions 而不是 Worker 原生 Cron：账户免费版的 5 个 cron 名额已被
+# 别的 Worker 占满（10072 报错）。
+#
+# Bark 推送由 Worker 侧发出（见 cloudflare-worker/sign-worker.js 的 notifyBark），
+# 设备地址存在 Worker 的加密变量 BARK 里，不在这个公开仓库中。所以这里不需要
+# 任何 secret，通知也会随签到结果一起送达。
 
 on:
   schedule:
