@@ -9,10 +9,9 @@ name: 环境探测
 # 配了 NORTH_COOKIE secret 之后，同一个 workflow 会顺带做一次带 Cookie 的真实校验。
 
 on:
-  push:
-    paths:
-      - ".github/workflows/probe.yml"
-      - "sign_north.py"
+  # 原本挂的是 push 触发，但诊断阶段早已结束：每次改 sign_north.py 都会自动跑一遍
+  # 并把报告提交回仓库，反而把本地推送反复挡在 "! [rejected] (fetch first)" 外面。
+  # 现在只留手动触发，需要时在 Actions 页面点 Run workflow。
   workflow_dispatch:
 
 permissions:
