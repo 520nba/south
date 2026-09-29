@@ -11,6 +11,13 @@ sign.log
 __pycache__/
 *.pyc
 
+# Cloudflare 部署凭据（绝对不要提交）
+.cf_creds.json
+.cf_token
+.cf_account
+.env
+.env.*
+
 # 工作区内部数据（助手记忆、会话状态）
 .workbuddy/
 
