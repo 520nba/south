@@ -1,0 +1,4 @@
+# 仓库里统一用 LF。
+# 这条不是洁癖：keepalive.yml 的 run: 块是给 Linux runner 上的 bash 执行的，
+# 文件一旦带上 CRLF，bash 会报 $'\r': command not found。
+* text=auto eol=lf

@@ -1,0 +1,36 @@
+name: 保活
+
+# GitHub 会在「仓库 60 天没有任何活动」后自动停用定时任务，然后给仓库所有者发一封邮件。
+# 这个工作流每月提交一次时间戳，把计时器顶回去。
+#
+# 说明白一点：由 GITHUB_TOKEN 发起的提交算不算「仓库活动」，官方文档没写死，
+# 社区里两种经验都有。所以别把它当保险，真正的保险是收到那封停用邮件后点一下
+# Re-enable，或者每两个月自己到 Actions 页面手动 Run 一次 daily-sign。
+# 觉得没必要可以整个文件删掉。
+
+on:
+  schedule:
+    - cron: "17 3 1 * *"     # 每月 1 号 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 写入保活时间戳
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/keepalive.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/keepalive.txt
+          if git diff --cached --quiet; then
+            echo "无变化，跳过提交"
+          else
+            git commit -m "chore: 保活 $(date -u +%F)"
+            git push
+          fi

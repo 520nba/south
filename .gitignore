@@ -1,0 +1,21 @@
+# 注意：.gitignore 不支持行尾注释，注释必须独占一行，
+# 否则整行会被当成一个带空格的匹配模式，什么也忽略不掉。
+
+# 凭据：绝对不能进仓库
+cookie.txt
+# 脚本自动生成，且有人会把 Cookie 直接填进去，索性整个文件忽略
+config.json
+
+# 运行产物
+sign.log
+__pycache__/
+*.pyc
+
+# 工作区内部数据（助手记忆、会话状态）
+.workbuddy/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,43 @@
+name: n+ 每日签到
+
+on:
+  schedule:
+    # GitHub 的 cron 一律按 UTC 算。01:23 UTC = 北京时间 09:23。
+    # 刻意避开整点：整点是 GitHub 定时任务最拥堵的时段，普遍会延迟几分钟到几十分钟。
+    - cron: "23 1 * * *"
+  workflow_dispatch:        # 支持手动触发，方便改完 Cookie 立刻验证
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 脚本只用标准库，没有 pip install 这一步
+      - name: 执行签到
+        env:
+          NORTH_COOKIE: ${{ secrets.NORTH_COOKIE }}
+          # 机房 IP 被 Cloudflare 拦时才需要配，不配就是空字符串，脚本会忽略
+          NORTH_PROXY: ${{ secrets.NORTH_PROXY }}
+        run: python sign_north.py --debug
+
+      # 无论成败都留一份日志，排错主要靠它
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sign-log
+          path: |
+            sign.log
+            config.json
+          if-no-files-found: ignore
+          retention-days: 14

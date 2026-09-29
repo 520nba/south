@@ -1,0 +1,63 @@
+name: 环境探测
+
+# 这个 workflow 的作用是「先确诊再治疗」：签到失败可能是两个完全不同的原因，
+#   ① Cloudflare 把机房 IP 挡在挑战页外面；
+#   ② PHPWind 把会话和登录时的 IP 绑定，异地重放 Cookie 一律判为未登录。
+# 两者的表现都是「您没有登录」，但解法完全不同，所以先把证据打出来。
+#
+# 不需要任何凭据就能跑：出口 IP、各站点可达性、CF 拦截、登录态。
+# 配了 NORTH_COOKIE secret 之后，同一个 workflow 会顺带做一次带 Cookie 的真实校验。
+
+on:
+  push:
+    paths:
+      - ".github/workflows/probe.yml"
+      - "sign_north.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 用来把报告提交回仓库
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 体检（不需要凭据）
+        run: |
+          mkdir -p ci-report
+          python sign_north.py --probe 2>&1 | tee ci-report/probe.md
+
+      - name: 带 Cookie 的真实校验（配了 secret 才会真正执行）
+        env:
+          NORTH_COOKIE: ${{ secrets.NORTH_COOKIE }}
+        run: |
+          printf '\n## 带 Cookie 的真实校验\n\n' >> ci-report/probe.md
+          if [ -z "$NORTH_COOKIE" ]; then
+            echo "未配置 NORTH_COOKIE secret，跳过这一步。" | tee -a ci-report/probe.md
+            exit 0
+          fi
+          echo "已读到 NORTH_COOKIE（${#NORTH_COOKIE} 字符）" | tee -a ci-report/probe.md
+          printf '\n```\n' >> ci-report/probe.md
+          python sign_north.py --check --debug 2>&1 | tee -a ci-report/probe.md || true
+          printf '\n```\n' >> ci-report/probe.md
+
+      - name: 把报告提交回仓库
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci-report
+          if git diff --cached --quiet; then
+            echo "报告无变化，跳过提交"
+          else
+            git commit -m "chore: CI 探测报告 (run ${{ github.run_number }})"
+            git push
+          fi
