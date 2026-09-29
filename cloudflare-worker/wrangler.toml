@@ -1,0 +1,16 @@
+# 用 wrangler CLI 部署时才需要这个文件；走 Cloudflare 网页面板部署可直接忽略。
+#
+#   npm i -g wrangler
+#   wrangler login
+#   wrangler secret put COOKIE      # 粘贴 cookie.txt 的内容，回车
+#   wrangler deploy
+#
+# 定时触发在下面 [triggers] 里声明，部署即生效。
+
+name = "south-sign"
+main = "sign-worker.js"
+compatibility_date = "2026-09-29"
+
+# 北京时间 09:23 = UTC 01:23。避开整点，那个时段 Cloudflare 的调度最拥堵。
+[triggers]
+crons = ["23 1 * * *"]
