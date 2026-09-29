@@ -66,8 +66,11 @@ TASK_NAME = "north_plus_sign"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 )
+# ⚠️ 这个站把会话绑定在 User-Agent 上：UA 与抓 Cookie 时的浏览器不一致，
+# 服务端会一律回「您还没有登录或注册」。上面这个字符串是抓 Cookie 那台机器
+# 的真实 UA（用 https://httpbin.org/user-agent 读取）。浏览器升级大版本后要同步改。
 
 # 同一套论坛程序的镜像域名，主站被 Cloudflare 拦了会依次重试
 DEFAULT_BASES = [

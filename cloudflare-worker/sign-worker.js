@@ -36,7 +36,10 @@ const MIRRORS = [
   'https://www.level-plus.net',
 ];
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+// ⚠️ 这个站把会话绑定在 User-Agent 上：UA 不符 → 一律回「您还没有登录」。
+// 默认值必须是抓 Cookie 那个浏览器的真实 UA（用 https://httpbin.org/user-agent 读）。
+// 与浏览器换版本（Chrome 升级）后要同步改，或用 UA 变量覆盖。
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
 
 const CF_MARKERS = ['Just a moment', 'cf-browser-verification', '__cf_chl',
                     'Attention Required', 'Checking your browser'];
@@ -67,9 +70,9 @@ function judgeLogin(text) {
   return '已登录';
 }
 
-async function httpGet(url, cookie) {
+async function httpGet(url, cookie, ua) {
   const headers = {
-    'User-Agent': UA,
+    'User-Agent': ua || UA,
     'Accept-Language': 'zh-CN,zh;q=0.9',
     'X-Requested-With': 'XMLHttpRequest',
     'Referer': url,
@@ -98,19 +101,22 @@ async function egressIP() {
   return 'unknown';
 }
 
-async function doProbe(cookie) {
+async function doProbe(cookie, ua) {
   const ip = await egressIP();
   const rows = [];
   for (const base of MIRRORS) {
     try {
-      const r = await httpGet(base + '/plugin.php?H_name=tasks.html', cookie);
+      const r = await httpGet(base + '/plugin.php?H_name=tasks.html', cookie, ua);
+      const ap = await authProbe(base, cookie, ua);
       rows.push({
         镜像: base,
         Code: r.status,
         字节: r.bytes,
         耗时ms: r.ms,
         CF拦截: looksCF(r.text),
-        登录态: judgeLogin(r.text),
+        页面登录态: judgeLogin(r.text),
+        鉴权: ap.authed ? '✅ 已登录' : '❌ 未登录',
+        鉴权原文: ap.msg.slice(0, 60),
         页面标题: titleOf(r.text),
         片段: r.text.replace(/\s+/g, ' ').slice(0, 120),
         服务端下发新Cookie: r.setCookie,
@@ -122,6 +128,7 @@ async function doProbe(cookie) {
   return {
     Worker出口IP: ip,
     Cookie: cookie ? `已传入（${cookie.length} 字符）` : '未传入（只做可达性探测）',
+    UserAgent: ua || UA,
     结果: rows,
   };
 }
@@ -129,15 +136,16 @@ async function doProbe(cookie) {
 // 直打真实 ajax 鉴权接口，绕开页面判断。
 // cid 传一个不存在的任务号即可做「零副作用」的鉴权探针：
 //   未登录 → 「您还没有登录或注册」；已登录 → 会变成任务不存在之类的文案。
-async function doAjax(cookie, action, cid, mirrorIdx) {
+async function doAjax(cookie, action, cid, mirrorIdx, ua) {
   const idx = Math.min(Math.max(mirrorIdx | 0, 0), MIRRORS.length - 1);
   const base = MIRRORS[idx];
   const url = `${base}/plugin.php?H_name=tasks&action=ajax&actions=${action}`
             + `&cid=${cid}&nowtime=${Date.now()}`;
-  const r = await httpGet(url, cookie);
+  const r = await httpGet(url, cookie, ua);
   return {
     url,
     Worker出口IP: await egressIP(),
+    UserAgent: ua || UA,
     Code: r.status,
     字节: r.bytes,
     原始: r.text.slice(0, 300),
@@ -145,33 +153,40 @@ async function doAjax(cookie, action, cid, mirrorIdx) {
   };
 }
 
-async function doSign(cookie, dryRun) {
+async function doSign(cookie, dryRun, ua) {
   if (!cookie) {
     return { ok: false, reason: '没有拿到 Cookie：请传 X-Cookie 请求头，或设置 COOKIE 变量' };
   }
-  const probe = await doProbe(cookie);
-  const usable = probe.结果.find((r) => !r.异常 && r.CF拦截 === false && r.登录态 === '已登录');
+  // 用鉴权探针挑镜像：CF 边缘拿到的任务页可能是别的实例，页面判断不可靠
+  const probes = [];
+  for (const base of MIRRORS) {
+    try {
+      probes.push(await authProbe(base, cookie, ua));
+    } catch (e) {
+      probes.push({ base, msg: String(e), authed: false });
+    }
+  }
+  const usable = probes.find((p) => p.authed);
 
   if (!usable) {
     return {
       ok: false,
-      reason: '没有任何镜像处于「已登录」状态，未提交任何任务',
-      Worker出口IP: probe.Worker出口IP,
-      结果: probe.结果,
+      reason: '所有镜像都判为未登录。若 Cookie 刚抓不久，检查 UA 是否与抓 Cookie 的浏览器一致（本接口可用 X-UA 覆盖）',
+      鉴权探针: probes,
     };
   }
   if (dryRun) {
-    return { ok: true, dryRun: true, 使用镜像: usable.镜像, Worker出口IP: probe.Worker出口IP };
+    return { ok: true, dryRun: true, 使用镜像: usable.base, 鉴权原文: usable.msg, 鉴权探针: probes };
   }
 
-  const base = usable.镜像;
+  const base = usable.base;
   const results = [];
   for (const t of TASKS) {
     const job = await httpGet(
-      `${base}/plugin.php?H_name=tasks&action=ajax&actions=job&cid=${t.cid}&nowtime=${Date.now()}`, cookie);
+      `${base}/plugin.php?H_name=tasks&action=ajax&actions=job&cid=${t.cid}&nowtime=${Date.now()}`, cookie, ua);
     await new Promise((r) => setTimeout(r, 1600));
     const reward = await httpGet(
-      `${base}/plugin.php?H_name=tasks&action=ajax&actions=job2&cid=${t.cid}&nowtime=${Date.now()}`, cookie);
+      `${base}/plugin.php?H_name=tasks&action=ajax&actions=job2&cid=${t.cid}&nowtime=${Date.now()}`, cookie, ua);
     results.push({
       任务: t.name,
       cid: t.cid,
@@ -180,7 +195,28 @@ async function doSign(cookie, dryRun) {
     });
     await new Promise((r) => setTimeout(r, 1000));
   }
-  return { ok: true, Worker出口IP: probe.Worker出口IP, 使用镜像: base, 结果: results };
+  return {
+    ok: true,
+    Worker出口IP: await egressIP(),
+    使用镜像: base,
+    鉴权原文: usable.msg,
+    结果: results,
+  };
+}
+
+// 用「不存在的 cid」做鉴权探针：不产生任何副作用，且能区分
+//   未登录 → 「您还没有登录或注册，暂时不能使用此功能」
+//   已登录 → 「confirm []是不开放!」之类的任务不存在文案
+async function authProbe(base, cookie, ua) {
+  const url = `${base}/plugin.php?H_name=tasks&action=ajax&actions=job`
+            + `&cid=99999&nowtime=${Date.now()}`;
+  const r = await httpGet(url, cookie, ua);
+  const msg = stripCdata(r.text);
+  return {
+    base,
+    msg,
+    authed: !/您还没有登录|不能使用此功能|未登录/.test(msg),
+  };
 }
 
 function cookieOf(env, request) {
@@ -212,25 +248,27 @@ export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname.replace(/\/+$/, '') || '/';
     const cookie = cookieOf(env, request);
+    const ua = (request.headers.get('X-UA') || (env && env.UA) || '').trim();
 
     if (path === '/') {
       return new Response(USAGE, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
-    if (path === '/probe') return json(await doProbe(cookie));
+    if (path === '/probe') return json(await doProbe(cookie, ua));
     if (path === '/ajax') {
       const q = new URL(request.url).searchParams;
       const action = (q.get('actions') || 'job').replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
       const cid = (q.get('cid') || '99999').replace(/[^0-9]/g, '').slice(0, 6) || '99999';
-      return json(await doAjax(cookie, action, cid, Number(q.get('mirror') || 0)));
+      return json(await doAjax(cookie, action, cid, Number(q.get('mirror') || 0), ua));
     }
     if (path === '/sign') {
       const dry = new URL(request.url).searchParams.get('dry') === '1';
-      return json(await doSign(cookie, dry));
+      return json(await doSign(cookie, dry, ua));
     }
     return new Response('未知路径，试试 / 或 /probe\n', { status: 404 });
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(doSign(cookieOf(env, null), false));
+    // 定时任务没有请求对象，Cookie 和 UA 都从 Worker 变量取（都要设！只设 Cookie 会因 UA 不符而失败）
+    ctx.waitUntil(doSign(cookieOf(env, null), false, (env && env.UA) || ''));
   },
 };

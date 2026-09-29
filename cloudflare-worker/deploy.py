@@ -103,6 +103,7 @@ def main() -> int:
     ap.add_argument("--subdomain", metavar="NAME", help="创建 workers.dev 子域（若尚无）")
     ap.add_argument("--cron", action="store_true", help="添加定时触发器 23 1 * * *")
     ap.add_argument("--secret-file", metavar="PATH", help="把这个文件的 Cookie 存为加密变量 COOKIE")
+    ap.add_argument("--ua", metavar="UA", help="把浏览器真实 UA 存为加密变量 UA（这个站按 UA 绑会话，必须设）")
     ap.add_argument("--all", action="store_true", help="= 上传 + workers.dev 路由")
     ap.add_argument("--show-url", action="store_true", help="只打印 Worker 地址")
     args = ap.parse_args()
@@ -165,6 +166,13 @@ def main() -> int:
                         {"name": "COOKIE", "text": cookie, "type": "secret_text"})
         step(ok, f"写入加密变量 COOKIE（{len(cookie)} 字符）"
              if ok else f"写入 COOKIE 失败：{errors_of(resp)}")
+
+    # 5. UA 密钥（这个站按 UA 绑会话，缺了定时任务必失败）
+    if args.ua:
+        ok, resp = call("PUT", f"/workers/scripts/{SCRIPT_NAME}/secrets", acct, token,
+                        {"name": "UA", "text": args.ua.strip(), "type": "secret_text"})
+        step(ok, f"写入加密变量 UA（{len(args.ua.strip())} 字符）"
+             if ok else f"写入 UA 失败：{errors_of(resp)}")
 
     if sub:
         print(f"\nWorker 地址：https://{SCRIPT_NAME}.{sub}.workers.dev")

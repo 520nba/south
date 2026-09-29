@@ -1,43 +1,49 @@
-name: n+ 每日签到
+name: n+ 每日签到（打火器）
+
+# 这个 workflow 已经退化成一个「打火器」：它只负责按点敲一下 Cloudflare Worker
+#
+#     curl https://south-sign.sony-fans.workers.dev/sign
+#
+# 真正的签到请求是从 **Cloudflare 边缘**发出的，不是从 GitHub 机房发出的。所以：
+#   · 不需要任何 secret（Cookie 和 UA 都存在 Worker 的加密变量里）
+#   · 不会再遇到前面那轮「Cloudflare 把 GitHub 机房 IP 挡在挑战页外」的问题
+#   · 也不会遇到会话绑定问题（UA 已固定为抓 Cookie 那个浏览器的真实 UA）
+#
+# 为什么不用 Worker 原生 Cron：账户免费版的 5 个 cron 名额已被别的 Worker 占满
+# （报错 10072）。等哪天腾出名额，把下面的 schedule 撤掉、改用 Worker 原生 Cron
+# 即可，这个文件可以直接删。
 
 on:
   schedule:
-    # GitHub 的 cron 一律按 UTC 算。01:23 UTC = 北京时间 09:23。
-    # 刻意避开整点：整点是 GitHub 定时任务最拥堵的时段，普遍会延迟几分钟到几十分钟。
+    # 01:23 UTC = 北京时间 09:23。避开整点，那是 GitHub 定时任务最拥堵的时段。
     - cron: "23 1 * * *"
-  workflow_dispatch:        # 支持手动触发，方便改完 Cookie 立刻验证
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/daily-sign.yml"
 
 permissions:
   contents: read
 
 jobs:
-  sign:
+  trigger:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      # 脚本只用标准库，没有 pip install 这一步
-      - name: 执行签到
-        env:
-          NORTH_COOKIE: ${{ secrets.NORTH_COOKIE }}
-          # 机房 IP 被 Cloudflare 拦时才需要配，不配就是空字符串，脚本会忽略
-          NORTH_PROXY: ${{ secrets.NORTH_PROXY }}
-        run: python sign_north.py --debug
-
-      # 无论成败都留一份日志，排错主要靠它
-      - name: 上传日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sign-log
-          path: |
-            sign.log
-            config.json
-          if-no-files-found: ignore
-          retention-days: 14
+      - name: 敲一下 Cloudflare Worker
+        run: |
+          set -o pipefail
+          code=$(curl -sS -o resp.json -w '%{http_code}' --max-time 180 \
+            -H 'Accept: application/json' \
+            "https://south-sign.sony-fans.workers.dev/sign")
+          echo "HTTP $code"
+          echo "----- Worker 返回 -----"
+          cat resp.json
+          echo
+          echo "-----------------------"
+          if [ "$code" != "200" ] || ! grep -q '"ok": true' resp.json; then
+            echo "::error::签到未成功，检查 Worker 的 COOKIE / UA 变量，或 Cookie 是否失效"
+            exit 1
+          fi
+          echo "签到成功"
