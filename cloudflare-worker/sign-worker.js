@@ -59,8 +59,9 @@ const BARK_GROUP = '南+签到';
 const BARK_TTL = 600;
 
 function looksCF(text) {
-  const head = text.slice(0, 4000);
-  return CF_MARKERS.some((m) => head.includes(m));
+  // 扫描**全文**而不是只扫头部：CF 挑战页在大页面里可能把标记推到 4000 之后，
+  // 只扫头部会漏判 —— 而漏判的后果正是「把挑战页当成任务结果，推送『本次无变化』」。
+  return CF_MARKERS.some((m) => text.includes(m));
 }
 
 function titleOf(text) {
@@ -69,8 +70,25 @@ function titleOf(text) {
 }
 
 function stripCdata(text) {
-  const m = text.match(/<!\[CDATA\[([\s\S]*?)\]\]>/);
-  return (m ? m[1] : text.replace(/<[^>]+>/g, '')).trim();
+  // 先剥掉 <style>/<script> 的**内容**再去标签：只去标签的话，<style> 里的 CSS
+  // 会原样留在正文里，推送到 Bark 就是「Just a moment...*{box-sizing:border-box;…}」
+  // 这种夹杂样式表的大段垃圾。
+  const noAssets = text
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ');
+  const m = noAssets.match(/<!\[CDATA\[([\s\S]*?)\]\]>/);
+  const body = m ? m[1] : noAssets.replace(/<[^>]+>/g, ' ');
+  return body.replace(/\s+/g, ' ').trim();
+}
+
+// 给 Bark / API 用的一句话摘要：优先取 <title>（CF 挑战页的标题就是
+// "Just a moment..."，比整页正文干净得多），否则用去样式后的正文。
+function snippet(text, n = 120) {
+  const t = titleOf(text);
+  const body = stripCdata(text);
+  if (t && (!body || body.startsWith(t))) return body.slice(0, n);
+  if (t) return `${t} — ${body}`.slice(0, n);
+  return body.slice(0, n);
 }
 
 function judgeLogin(text) {
@@ -157,8 +175,9 @@ async function doAjax(cookie, action, cid, mirrorIdx, ua) {
     UserAgent: ua || UA,
     Code: r.status,
     字节: r.bytes,
+    CF拦截: looksCF(r.text),
     原始: r.text.slice(0, 300),
-    CDATA: stripCdata(r.text).slice(0, 200),
+    CDATA: snippet(r.text, 200),
   };
 }
 
@@ -176,12 +195,19 @@ async function doSign(env, cookie, dryRun, ua) {
     }
   }
   const usable = probes.find((p) => p.authed);
+  const cfBlocked = probes.filter((p) => p.cf).length;
 
   if (!usable) {
-    const reason = '所有镜像都判为未登录。若 Cookie 刚抓不久，检查 UA 是否与抓 Cookie 的浏览器一致';
+    // 区分两种失败：一个镜像都没通（多为出口 IP 被 CF 拦）vs 通了但判为未登录。
+    // 旧实现把两者都说成「未登录」，真正的原因（CF 挑战页）反而看不到。
+    const reason = (cfBlocked === probes.length && cfBlocked > 0)
+      ? `所有镜像都被 Cloudflare 拦截（拿不到可信正文），无法签到。`
+        + `Worker 出口 IP 被 CF 判定为风险来源，换个出口或稍后重试；`
+        + `这也**不代表 Cookie 失效**。`
+      : `所有镜像都判为未登录。若 Cookie 刚抓不久，检查 UA 是否与抓 Cookie 的浏览器一致`;
     const bark = await notifyBark(env, '南+ 签到失败',
-      `${reason}\n` + probes.map((p) => `${p.base}: ${p.msg}`).join('\n'));
-    return { ok: false, reason, bark, 鉴权探针: probes };
+      `${reason}\n\n` + probes.map((p) => `${p.base}: HTTP ${p.status} ${p.cf ? '[CF拦截] ' : ''}${p.msg}`).join('\n'));
+    return { ok: false, reason, CF拦截数: cfBlocked, bark, 鉴权探针: probes };
   }
   if (dryRun) {
     return { ok: true, dryRun: true, 使用镜像: usable.base, 鉴权原文: usable.msg, 鉴权探针: probes };
@@ -195,27 +221,47 @@ async function doSign(env, cookie, dryRun, ua) {
     await new Promise((r) => setTimeout(r, 1600));
     const reward = await httpGet(
       `${base}/plugin.php?H_name=tasks&action=ajax&actions=job2&cid=${t.cid}&nowtime=${Date.now()}`, cookie, ua);
+    const cf = looksCF(job.text) || looksCF(reward.text);
     results.push({
       任务: t.name,
       cid: t.cid,
       申请任务: stripCdata(job.text).slice(0, 120),
       领取奖励: stripCdata(reward.text).slice(0, 120),
+      CF拦截: cf,
+      Code: `${job.status}/${reward.status}`,
     });
     await new Promise((r) => setTimeout(r, 1000));
   }
   const bj = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  const blocked = results.filter((r) => r.CF拦截);
   const lines = results.map((r) => {
+    if (r.CF拦截) return `⚠️ ${r.任务}：被 Cloudflare 拦截（HTTP ${r.Code}）`;
     const raw = String(r.领取奖励 || r.申请任务 || '');
     const got = /^success/.test(raw);
     return `${got ? '✓' : '·'} ${r.任务}：${raw.replace(/^success\s*/, '')}`;
   });
   // 只有至少一个任务真的「success」才算有变化，否则如实说无变化（冷却期重复跑就是这种）
-  const changed = results.some((r) => /^success/.test(String(r.领取奖励 || '')));
-  const bark = await notifyBark(env, changed ? '南+ 签到完成' : '南+ 签到（本次无变化）',
+  const changed = results.some((r) => !r.CF拦截 && /^success/.test(String(r.领取奖励 || '')));
+
+  let title;
+  if (blocked.length === results.length) title = '南+ 签到失败（CF 拦截）';
+  else if (changed) title = '南+ 签到完成';
+  else title = '南+ 签到（本次无变化）';
+
+  if (blocked.length) {
+    lines.push('', `说明：${blocked.length}/${results.length} 个任务被 CF 挑战页拦截，未真正执行。`);
+    lines.push('这通常是 Worker 出口 IP 被 CF 判定为风险来源，不代表 Cookie 失效。');
+  }
+  const bark = await notifyBark(env, title,
     [`${bj}（北京）`, `镜像 ${base.replace('https://www.', '')}`, '', ...lines].join('\n'));
 
   return {
-    ok: true,
+    // ok 表示「签到链路是否被 CF 阻断」。只要还有任务真的跑成功就为 true；
+    // 全被拦截时为 false —— 旧实现恒为 true（它只表示鉴权探针通过），
+    // 会让调用方（和 GitHub Actions）把「被 CF 挡住」误当成签到成功。
+    ok: blocked.length < results.length,
+    auth_ok: true,
+    CF拦截: blocked.length,
     Worker出口IP: await egressIP(),
     使用镜像: base,
     鉴权原文: usable.msg,
@@ -227,15 +273,25 @@ async function doSign(env, cookie, dryRun, ua) {
 // 用「不存在的 cid」做鉴权探针：不产生任何副作用，且能区分
 //   未登录 → 「您还没有登录或注册，暂时不能使用此功能」
 //   已登录 → 「confirm []是不开放!」之类的任务不存在文案
+//
+// ⚠️ 必须显式排除 CF 挑战页。旧实现在这里只看「有没有未登录字样」，
+//    而 CF 挑战页两个标记都没有 → 被判成 authed: true → 后续请求全部返回挑战页，
+//    但代码以为在正常签到，于是推送出「本次无变化」这种**误导性成功**。
 async function authProbe(base, cookie, ua) {
   const url = `${base}/plugin.php?H_name=tasks&action=ajax&actions=job`
             + `&cid=99999&nowtime=${Date.now()}`;
   const r = await httpGet(url, cookie, ua);
-  const msg = stripCdata(r.text);
+  const text = r.text || '';
+  const cf = looksCF(text);
+  const msg = snippet(text, 160);
+  // CF 拦截 / 5xx 一律不算「已登录」：拿不到可信正文就无法判定鉴权状态。
+  const dead = cf || r.status >= 500;
   return {
     base,
     msg,
-    authed: !/您还没有登录|不能使用此功能|未登录/.test(msg),
+    status: r.status,
+    cf,
+    authed: !dead && !/您还没有登录|不能使用此功能|未登录/.test(msg),
   };
 }
 

@@ -107,7 +107,10 @@ def multipart(fields: dict, files: list) -> tuple[bytes, str]:
 
 
 def step(ok: bool, msg: str) -> bool:
-    print(("  ✓ " if ok else "  ✗ ") + msg, flush=True)
+    # 用纯 ASCII 标记：原先的 "✓"/"✗" 在 GBK 控制台会抛 UnicodeEncodeError
+    # 而**在请求已发出之后**崩掉，导致「部署其实成功了，但脚本退出码非 0」——
+    # 只看退出码会误判。改成 ASCII 后这个坑不再存在。
+    print(("  [OK] " if ok else "  [!!] ") + msg, flush=True)
     return ok
 
 

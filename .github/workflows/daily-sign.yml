@@ -76,7 +76,9 @@ jobs:
             exit 1
           fi
           if [ "$code" != "200" ] || ! grep -q '"ok": true' resp.json; then
-            echo "::error::签到未成功，检查 Worker 的 COOKIE / UA 变量，或 Cookie 是否失效"
+            echo "::error::签到未成功。先看上面的 Worker 返回："
+            echo "  · 若含 CF拦截 / Cloudflare → Worker 出口 IP 被 CF 挑战页挡住，不是 Cookie 失效；稍后重试或换出口。"
+            echo "  · 若含「未登录」→ 检查 Worker 的 COOKIE / UA 变量，或 Cookie 是否失效（UA 须与抓 Cookie 的浏览器一致）。"
             exit 1
           fi
           echo "签到成功"
