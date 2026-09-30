@@ -16,13 +16,17 @@
 //   3. 拿到地址 https://<名字>.<子域>.workers.dev
 //
 // ── 接口 ───────────────────────────────────────────────────────────────────
+//   全部接口都要求请求头 X-Auth 等于 Worker 变量 SIGN_TOKEN，否则一律 404。
 //   GET /            用法说明
-//   GET /probe       无凭据探测四个镜像（出口 IP / 状态码 / CF 拦截 / 登录态）
+//   GET /probe       探测四个镜像（出口 IP / 状态码 / CF 拦截 / 登录态）
 //   GET /sign        执行签到
 //   GET /sign?dry=1  只校验登录态，不提交任务
 //   传 Cookie 两种方式（两个接口都支持）：
 //     · 请求头 X-Cookie: eb9e6_winduser=...   临时测试用这个最省事
 //     · Worker 变量 COOKIE（Settings → Variables，建议勾加密）  正式用法
+//
+//   示例：
+//     curl -H "X-Auth: $SIGN_TOKEN" https://<名字>.<子域>.workers.dev/sign
 //
 // ── 定时（确认可用后再加）──────────────────────────────────────────────────
 //   Settings → Triggers → Cron Triggers 填 23 1 * * *（UTC = 北京时间 09:23）
@@ -280,11 +284,53 @@ function json(obj) {
   });
 }
 
+// ── 共享密钥鉴权 ───────────────────────────────────────────────────────────
+// 这个 Worker 挂在公开的 workers.dev 地址上，而仓库本身也是公开的：没有鉴权的话
+// 任何人拿到地址就能无限次触发 /sign（刷爆 Cloudflare 额度、耗光 Bark 推送配额，
+// 还能从 /probe 读走出口 IP 和页面片段）。
+//
+// 因此所有 HTTP 路径（含 / 与 /probe）都要求请求头 X-Auth 等于 Worker 变量 SIGN_TOKEN。
+// 校验失败一律返回 404，与「未知路径」的响应完全一致，不透露任何路径是否存在。
+//
+// SIGN_TOKEN 未配置时无人能通过校验 —— 默认拒绝，而不是默认放行。
+// 用 `python deploy.py --sign-token <随机串>` 写入，或到
+// Settings → Variables and Secrets 手动添加（类型选 Secret）。
+//
+// 注意：Cron 触发的 scheduled 处理器不经过这里（它只读 env.COOKIE / env.UA），
+// 所以启用鉴权不影响定时签到本身。
+//
+// 比较前先各自 SHA-256，这样比较的是两个等长摘要，避免按字符逐位比较时
+// 因提前返回而泄漏前缀信息。
+async function constantTimeEqual(a, b) {
+  const enc = new TextEncoder();
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
+  const va = new Uint8Array(da);
+  const vb = new Uint8Array(db);
+  let diff = 0;
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i];
+  return diff === 0;
+}
+
+async function isAuthorized(request, env) {
+  const expected = ((env && env.SIGN_TOKEN) || '').trim();
+  if (!expected) return false;                       // 未配置密钥 → 全部拒绝
+  const provided = (request.headers.get('X-Auth') || '').trim();
+  if (!provided) return false;
+  return constantTimeEqual(provided, expected);
+}
+
 const USAGE = `南+ 签到 Worker
 
-  GET /probe                无凭据探测四个镜像
+  所有接口都需要请求头 X-Auth（值 = Worker 变量 SIGN_TOKEN），否则返回 404。
+
+  GET /probe                探测四个镜像
   GET /sign                 执行签到
   GET /sign?dry=1           只校验登录态，不提交
+
+  curl -H "X-Auth: $SIGN_TOKEN" https://<名字>.<子域>.workers.dev/sign
 
 传 Cookie：
   · 请求头 X-Cookie: eb9e6_winduser=...
@@ -296,6 +342,13 @@ const USAGE = `南+ 签到 Worker
 
 export default {
   async fetch(request, env) {
+    // 鉴权放在最前面：连 / 和 /probe 也要带密钥。
+    // 失败时返回与「未知路径」完全相同的 404，攻击者无法通过状态码或文案区分
+    // 「路径不存在」和「密钥不对」。
+    if (!(await isAuthorized(request, env))) {
+      return new Response('未知路径，试试 / 或 /probe\n', { status: 404 });
+    }
+
     const path = new URL(request.url).pathname.replace(/\/+$/, '') || '/';
     const cookie = cookieOf(env, request);
     const ua = (request.headers.get('X-UA') || (env && env.UA) || '').trim();

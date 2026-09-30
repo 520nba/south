@@ -18,7 +18,20 @@ API Token 所需的最小权限（Account 级）
     python deploy.py --subdomain xxx # 顺带创建 workers.dev 子域（若还没有）
     python deploy.py --cron          # 再加定时触发器 23 1 * * *
     python deploy.py --secret-file ../cookie.txt   # 顺带把 Cookie 存成加密变量 COOKIE
-    python deploy.py --all --subdomain xxx --secret-file ../cookie.txt
+    python deploy.py --sign-token <随机串>          # 顺带设置接口鉴权密钥 SIGN_TOKEN
+    python deploy.py --all --subdomain xxx --secret-file ../cookie.txt --sign-token <随机串>
+
+关于 --sign-token
+-----------------
+sign-worker.js 的所有 HTTP 接口都要求请求头 X-Auth 等于变量 SIGN_TOKEN，
+否则一律 404（细节见该文件顶部注释）。SIGN_TOKEN 没设置时没有任何请求能通过，
+所以**必须在第一次部署时就一起设置**，否则 Worker 会一直返回 404。
+
+生成随机串：
+    python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+同一个值要填到 GitHub 仓库 Secret `WORKER_SIGN_TOKEN`
+（.github/workflows/daily-sign.yml 会把它放进 X-Auth 请求头）。
 """
 
 from __future__ import annotations
@@ -103,6 +116,8 @@ def main() -> int:
     ap.add_argument("--subdomain", metavar="NAME", help="创建 workers.dev 子域（若尚无）")
     ap.add_argument("--cron", action="store_true", help="添加定时触发器 23 1 * * *")
     ap.add_argument("--secret-file", metavar="PATH", help="把这个文件的 Cookie 存为加密变量 COOKIE")
+    ap.add_argument("--sign-token", metavar="TOKEN",
+                    help="设置接口鉴权密钥 SIGN_TOKEN（所有 HTTP 接口都要求 X-Auth 头等于它）")
     ap.add_argument("--ua", metavar="UA", help="把浏览器真实 UA 存为加密变量 UA（这个站按 UA 绑会话，必须设）")
     ap.add_argument("--bark", metavar="URL", help="Bark 设备地址存为加密变量 BARK，如 https://api.day.app/<key>")
     ap.add_argument("--bark-group", metavar="NAME", help="推送分组名（默认 南+签到）")
@@ -177,6 +192,18 @@ def main() -> int:
         step(ok, f"写入加密变量 UA（{len(args.ua.strip())} 字符）"
              if ok else f"写入 UA 失败：{errors_of(resp)}")
 
+    # 5b. 接口鉴权密钥（不设置的话所有 HTTP 接口都返回 404）
+    if args.sign_token:
+        sign_token = args.sign_token.strip()
+        if len(sign_token) < 16:
+            step(False, f"SIGN_TOKEN 太短（{len(sign_token)} 字符），建议至少 16；"
+                        f"已跳过，Worker 会继续拒绝所有 HTTP 请求")
+        else:
+            ok, resp = call("PUT", f"/workers/scripts/{SCRIPT_NAME}/secrets", acct, token,
+                            {"name": "SIGN_TOKEN", "text": sign_token, "type": "secret_text"})
+            step(ok, f"写入加密变量 SIGN_TOKEN（{len(sign_token)} 字符）"
+                 if ok else f"写入 SIGN_TOKEN 失败：{errors_of(resp)}")
+
     # 6. Bark 推送地址 + 可选分组/TTL
     for name, val in (("BARK", args.bark), ("BARK_GROUP", args.bark_group),
                       ("BARK_TTL", args.bark_ttl)):
@@ -190,7 +217,13 @@ def main() -> int:
 
     if sub:
         print(f"\nWorker 地址：https://{SCRIPT_NAME}.{sub}.workers.dev")
-        print(f"自测：curl \"https://{SCRIPT_NAME}.{sub}.workers.dev/probe\"")
+        if args.sign_token and len(args.sign_token.strip()) >= 16:
+            print(f"自测：curl -H \"X-Auth: $SIGN_TOKEN\" "
+                  f"\"https://{SCRIPT_NAME}.{sub}.workers.dev/probe\"")
+        else:
+            print("⚠️ 本次没有设置 SIGN_TOKEN，Worker 会拒绝所有 HTTP 请求（一律 404）。")
+            print("   重新部署时加上：--sign-token <随机串>，并把同一个值填进")
+            print("   GitHub 仓库 Secret WORKER_SIGN_TOKEN。")
     return 0
 
 

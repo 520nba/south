@@ -2,10 +2,9 @@ name: n+ 每日签到（打火器）
 
 # 这个 workflow 已经退化成一个「打火器」：它只负责按点敲一下 Cloudflare Worker
 #
-#     curl https://south-sign.sony-fans.workers.dev/sign
+#     curl -H "X-Auth: $WORKER_SIGN_TOKEN" "$WORKER_SIGN_URL/sign"
 #
 # 真正的签到请求是从 **Cloudflare 边缘**发出的，不是从 GitHub 机房发出的。所以：
-#   · 不需要任何 secret（Cookie 和 UA 都存在 Worker 的加密变量里）
 #   · 不会再遇到前面那轮「Cloudflare 把 GitHub 机房 IP 挡在挑战页外」的问题
 #   · 也不会遇到会话绑定问题（UA 已固定为抓 Cookie 那个浏览器的真实 UA）
 #
@@ -13,8 +12,14 @@ name: n+ 每日签到（打火器）
 # 别的 Worker 占满（10072 报错）。
 #
 # Bark 推送由 Worker 侧发出（见 cloudflare-worker/sign-worker.js 的 notifyBark），
-# 设备地址存在 Worker 的加密变量 BARK 里，不在这个公开仓库中。所以这里不需要
-# 任何 secret，通知也会随签到结果一起送达。
+# 设备地址存在 Worker 的加密变量 BARK 里，不在这个公开仓库中。
+#
+# ── 需要配置的两个仓库 Secret（Settings → Secrets and variables → Actions）────
+#   WORKER_SIGN_URL    Worker 地址，不带结尾斜杠。例：https://south-sign.<子域>.workers.dev
+#   WORKER_SIGN_TOKEN  必须与 Worker 端变量 SIGN_TOKEN 完全一致
+#
+# 为什么要挪进 Secret：这个仓库是公开的，之前把完整 Worker 地址写在 workflow 里，
+# 等于把「打火器」的入口公布出去；而 Worker 端现已要求 X-Auth 鉴权，密钥更不能入库。
 
 on:
   schedule:
@@ -34,17 +39,42 @@ jobs:
     timeout-minutes: 8
 
     steps:
-      - name: 敲一下 Cloudflare Worker
+      - name: 检查 Secret 是否配置
+        env:
+          WORKER_SIGN_URL: ${{ secrets.WORKER_SIGN_URL }}
+          WORKER_SIGN_TOKEN: ${{ secrets.WORKER_SIGN_TOKEN }}
         run: |
           set -o pipefail
+          missing=""
+          [ -z "$WORKER_SIGN_URL" ] && missing="$missing WORKER_SIGN_URL"
+          [ -z "$WORKER_SIGN_TOKEN" ] && missing="$missing WORKER_SIGN_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少仓库 Secret:$missing（Settings → Secrets and variables → Actions）"
+            exit 1
+          fi
+          echo "Secret 已配置"
+
+      - name: 敲一下 Cloudflare Worker
+        env:
+          WORKER_SIGN_URL: ${{ secrets.WORKER_SIGN_URL }}
+          WORKER_SIGN_TOKEN: ${{ secrets.WORKER_SIGN_TOKEN }}
+        run: |
+          set -o pipefail
+          # URL 与密钥都从环境变量取，不拼进命令行文本，避免出现在日志/进程列表里。
+          # 密钥走请求头而不是查询串：查询串会留在 Cloudflare 的访问日志里。
           code=$(curl -sS -o resp.json -w '%{http_code}' --max-time 180 \
             -H 'Accept: application/json' \
-            "https://south-sign.sony-fans.workers.dev/sign")
+            -H "X-Auth: $WORKER_SIGN_TOKEN" \
+            "${WORKER_SIGN_URL%/}/sign")
           echo "HTTP $code"
           echo "----- Worker 返回 -----"
           cat resp.json
           echo
           echo "-----------------------"
+          if [ "$code" = "404" ]; then
+            echo "::error::Worker 返回 404：要么 URL 不对，要么 Worker 端的 SIGN_TOKEN 与仓库 Secret WORKER_SIGN_TOKEN 不一致"
+            exit 1
+          fi
           if [ "$code" != "200" ] || ! grep -q '"ok": true' resp.json; then
             echo "::error::签到未成功，检查 Worker 的 COOKIE / UA 变量，或 Cookie 是否失效"
             exit 1
